@@ -121,22 +121,29 @@ jobs:
         # if it doesn't join the live chain. This ends the you-freeze / I-test / repeat loop.
         run: |
           set +e
-          export PEX_JOIN_VIEW=0 PEX_LAUNCH_HOME="$PWD/.pexfrozen" PEX_BOX_URL="$BOX_URL"
+          # Detect sync via the node's OWN /status endpoint, not stdout: the shipped Windows exe runs `pythonw` (NO console)
+          # so its stdout never reaches a file — but join_forever serves /status when PEX_JOIN_STATUS_PORT is set. This is
+          # console-independent AND exercises the REAL pythonw path a user gets.
+          export PEX_JOIN_VIEW=0 PEX_JOIN_STATUS_PORT=8765 PEX_JOIN_STATUS_HOST=127.0.0.1
+          export PEX_LAUNCH_HOME="$PWD/.pexfrozen" PEX_BOX_URL="$BOX_URL"
           rm -rf "$PEX_LAUNCH_HOME"
           if [ "${{ matrix.exe }}" = "pex.exe" ]; then BIN="./pex/pex.exe"; else BIN="./pex/pex"; fi
           "$BIN" > frozen_smoke.log 2>&1 &
           PID=$!
+          OK=0; R=""
           for i in $(seq 1 45); do
             sleep 2
-            grep -q "AT THE LIVE TIP" frozen_smoke.log && break
+            R=$(curl -s "http://127.0.0.1:8765/status" 2>/dev/null)
+            if printf '%s' "$R" | python -c "import sys,json;d=json.load(sys.stdin);sys.exit(0 if d.get('in_sync') else 1)" 2>/dev/null; then OK=1; break; fi
             kill -0 $PID 2>/dev/null || break
           done
           kill $PID 2>/dev/null; wait $PID 2>/dev/null
-          echo "---- frozen_smoke.log (tail) ----"; tail -n 30 frozen_smoke.log
-          if grep -q "AT THE LIVE TIP" frozen_smoke.log; then
-            echo "FROZEN SMOKE-TEST PASSED - the exe reached the live tip"
+          echo "---- last /status ----"; printf '%s\n' "$R"
+          echo "---- frozen_smoke.log (tail) ----"; tail -n 20 frozen_smoke.log 2>/dev/null
+          if [ "$OK" = "1" ]; then
+            echo "FROZEN SMOKE-TEST PASSED - the frozen exe reached the live tip (in_sync via /status)"
           else
-            echo "FROZEN SMOKE-TEST FAILED - the exe never reached the tip (see log above)"; exit 1
+            echo "FROZEN SMOKE-TEST FAILED - never reached in_sync (see /status + log above)"; exit 1
           fi
 
       - name: Zip the package
