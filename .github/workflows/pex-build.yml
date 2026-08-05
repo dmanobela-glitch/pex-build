@@ -10,6 +10,10 @@ name: Build PEX one-click fetch-launcher (pex-win.zip / pex-linux.zip)
 # --onefile (its own python internal — no sibling python3xx.dll clash with the embeddable one in the same folder).
 # AV-friendly (Master vetoed MS-submit + cert): NO UPX; company/product/version metadata; small launcher. NO cross-compile.
 on:
+  # PUSH is a build request (engine 2037 path B) — works with a Contents:write token, no Actions:write needed.
+  push:
+    branches: [main]
+    paths: ['launcher/**', '.github/workflows/**']
   workflow_dispatch:
     inputs:
       box_url:
@@ -17,8 +21,14 @@ on:
         required: true
         default: 'https://compute.bull4life.com'
 
+permissions:
+  contents: write            # so the build can publish the artifacts as a Release (public download, token-free retrieval)
+
 jobs:
   build:
+    # BOX_URL resolves for BOTH triggers: dispatch input if given, else the default box.
+    env:
+      BOX_URL: ${{ github.event.inputs.box_url || 'https://compute.bull4life.com' }}
     name: build-${{ matrix.zip }}
     strategy:
       fail-fast: false
@@ -97,11 +107,11 @@ jobs:
       - name: Self-check the LAUNCHER LOGIC against the live box (fetch+verify+extract, no GUI)
         run: |
           set -e
-          export PEX_BOX_URL="${{ github.event.inputs.box_url }}"
+          export PEX_BOX_URL="$BOX_URL"
           export PEX_LAUNCH_HOME="$PWD/.pexhome"
           export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
           "${{ matrix.pyx }}" -c "import sys,os; sys.path.insert(0,'launcher'); import pex_launch as L; py=L._find_python(); d=L.fetch_current(py); assert os.path.isfile(os.path.join(d,'node','pex_join_out.py')), 'no pex_join_out in fetched tree'; print('SELFCHECK FETCH+VERIFY OK ->', d)"
-          BOXFP=$("${{ matrix.pyx }}" -c "import json,urllib.request; print(json.loads(urllib.request.urlopen('${{ github.event.inputs.box_url }}/node_version',timeout=15).read()).get('consensus_fingerprint',''))")
+          BOXFP=$("${{ matrix.pyx }}" -c "import json,urllib.request; print(json.loads(urllib.request.urlopen('$BOX_URL/node_version',timeout=15).read()).get('consensus_fingerprint',''))")
           echo "$BOXFP" > "${{ matrix.zip }}.fp"
           echo "box fp: $BOXFP"; test -n "$BOXFP"
 
@@ -111,7 +121,7 @@ jobs:
         # if it doesn't join the live chain. This ends the you-freeze / I-test / repeat loop.
         run: |
           set +e
-          export PEX_JOIN_VIEW=0 PEX_LAUNCH_HOME="$PWD/.pexfrozen" PEX_BOX_URL="${{ github.event.inputs.box_url }}"
+          export PEX_JOIN_VIEW=0 PEX_LAUNCH_HOME="$PWD/.pexfrozen" PEX_BOX_URL="$BOX_URL"
           rm -rf "$PEX_LAUNCH_HOME"
           if [ "${{ matrix.exe }}" = "pex.exe" ]; then BIN="./pex/pex.exe"; else BIN="./pex/pex"; fi
           "$BIN" > frozen_smoke.log 2>&1 &
@@ -139,3 +149,14 @@ jobs:
             ${{ matrix.zip }}
             ${{ matrix.zip }}.fp
           retention-days: 14
+
+      - name: Publish as a Release (PUBLIC download — I pull these to the box with no Actions perms needed)
+        # Uses the workflow's own GITHUB_TOKEN (permissions.contents: write). Both matrix legs upload to the same tag;
+        # the box then curls https://github.com/dmanobela-glitch/pex-build/releases/download/build-latest/<zip>.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-latest
+          name: PEX latest build (fetch-launcher)
+          files: |
+            ${{ matrix.zip }}
+            ${{ matrix.zip }}.fp
