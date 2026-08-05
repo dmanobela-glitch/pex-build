@@ -100,6 +100,9 @@ jobs:
           if [ "${{ matrix.exe }}" = "pex.exe" ]; then
             test -f pex/pythonw.exe || { echo "pythonw.exe missing"; exit 1; }
             pex/python.exe -c "import secrets,hashlib,ssl,cryptography; print('win sibling python OK', cryptography.__version__)"
+            # GUI stack must at least IMPORT in the shipped python (pywebview + pythonnet/clr) — a broken import = no window.
+            # Non-fatal warn (headless still works + WebView2/.NET runtime is a per-machine dep), but surfaced in the log.
+            pex/python.exe -c "import webview, clr_loader; print('win GUI stack import OK')" || echo "WARN: GUI stack import FAILED (pywebview/pythonnet) — window may not open"
           else
             pex/bin/python3 -c "import secrets,hashlib,ssl,cryptography; print('linux sibling python OK', cryptography.__version__)"
           fi

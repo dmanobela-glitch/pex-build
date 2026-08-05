@@ -37,6 +37,13 @@ def _log(m):
     stdout raises UnicodeEncodeError on non-ASCII → a bare print() would kill the launcher SILENTLY. Never let logging
     take the app down."""
     msg = f'[pex-launch] {m}'
+    # FILE sink (always) — a windowless double-click has no console, so this is the ONLY way to see what happened.
+    try:
+        os.makedirs(HOME, exist_ok=True)
+        with open(os.path.join(HOME, 'launch.log'), 'a', encoding='utf-8', errors='replace') as _lf:
+            _lf.write(msg + '\n')
+    except Exception:
+        pass
     for sink in (sys.stdout, sys.stderr):
         try:
             if sink is None:
@@ -177,9 +184,16 @@ def run(run_dir: str, py: str):
     env['PYTHONPATH'] = run_dir + os.pathsep + env.get('PYTHONPATH', '')
     _log(f'launching {py} -m node.pex_join_out from {run_dir}')
     if _IS_WIN:
-        # os.execv on Windows is flaky for GUI processes; spawn + exit so the parent doesn't linger.
+        # os.execv on Windows is flaky for GUI processes; spawn + exit so the parent doesn't linger. Capture the child's
+        # stdout/stderr to run.log — a windowless GUI child prints NOWHERE otherwise, so this is our only view of a GUI
+        # (pywebview/WebView2) failure that would leave the user staring at nothing.
         os.chdir(run_dir)
-        p = subprocess.Popen([py, '-m', 'node.pex_join_out'] + sys.argv[1:], env=env)
+        try:
+            logf = open(os.path.join(HOME, 'run.log'), 'w', encoding='utf-8', errors='replace')
+        except Exception:
+            logf = None
+        p = subprocess.Popen([py, '-m', 'node.pex_join_out'] + sys.argv[1:], env=env,
+                             stdout=logf, stderr=logf)
         sys.exit(p.wait())
     os.execve(py, [py, '-m', 'node.pex_join_out'] + sys.argv[1:], env)
 
