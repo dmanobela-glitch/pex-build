@@ -1,0 +1,162 @@
+name: Build PEX one-click fetch-launcher (pex-win.zip / pex-linux.zip)
+# Cludia 0561 (Model A refined to FETCH-ON-EVERY-LAUNCH). Wraps her PROVEN launcher launcher/pex_launch.py into a frozen
+# pex.exe that ships the embeddable CPython (pythonw.exe) BESIDE it. On EVERY launch the exe: GET /node_version (box fp) →
+# GET /download/pex-node.tar.gz → verify the extracted tree's consensus_fingerprint == box fp (fork-safe) → atomic-swap
+# into ~/.pex/current → exec `pythonw.exe -m node.pex_join_out` from there. So a cold start is ALWAYS current — no baked
+# staleness, no stranding across a flip, and NEVER an exe rebuild for future flips (only the tiny launcher is frozen).
+#
+# CRITICAL (Cludia's _find_python + engine 2024 crux): when frozen, sys.executable == the onefile temp dir, so the launcher
+# finds the SIBLING python via PEX_APP_DIR (set by pex_entry) / sys.argv[0], and execs it — never itself. pex.exe MUST be
+# --onefile (its own python internal — no sibling python3xx.dll clash with the embeddable one in the same folder).
+# AV-friendly (Master vetoed MS-submit + cert): NO UPX; company/product/version metadata; small launcher. NO cross-compile.
+on:
+  # PUSH is a build request (engine 2037 path B) — works with a Contents:write token, no Actions:write needed.
+  push:
+    branches: [main]
+    paths: ['launcher/**', '.github/workflows/**']
+  workflow_dispatch:
+    inputs:
+      box_url:
+        description: 'the box the launcher fetches from at runtime'
+        required: true
+        default: 'https://compute.bull4life.com'
+
+permissions:
+  contents: write            # so the build can publish the artifacts as a Release (public download, token-free retrieval)
+
+jobs:
+  build:
+    # BOX_URL resolves for BOTH triggers: dispatch input if given, else the default box.
+    env:
+      BOX_URL: ${{ github.event.inputs.box_url || 'https://compute.bull4life.com' }}
+    name: build-${{ matrix.zip }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            zip: pex-linux.zip
+            exe: pex
+            pbs: 'https://github.com/indygreg/python-build-standalone/releases/download/20241016/cpython-3.12.7+20241016-x86_64-unknown-linux-gnu-install_only.tar.gz'
+            pyx: python/bin/python3
+          - runner: windows-latest
+            zip: pex-win.zip
+            exe: pex.exe
+            pbs: 'https://github.com/indygreg/python-build-standalone/releases/download/20241016/cpython-3.12.7+20241016-x86_64-pc-windows-msvc-install_only.tar.gz'
+            pyx: python/python.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout (has launcher/pex_launch.py + pex_entry.py)
+        uses: actions/checkout@v4
+
+      - name: Build-python (runs Nuitka)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Fetch the embeddable CPython that ships BESIDE the exe
+        run: |
+          set -e
+          curl -fsSL "${{ matrix.pbs }}" -o pbs.tar.gz
+          tar xzf pbs.tar.gz            # -> ./python/
+          "${{ matrix.pyx }}" --version
+
+      - name: Vendor deps into the embeddable python
+        run: |
+          set -e
+          "${{ matrix.pyx }}" -m pip install --upgrade pip
+          "${{ matrix.pyx }}" -m pip install cryptography certifi
+          "${{ matrix.pyx }}" -m pip install pywebview || echo "pywebview optional (GUI falls back to terminal)"
+
+      - name: Install Nuitka (build-python)
+        run: python -m pip install "nuitka" ordered-set zstandard
+
+      - name: Freeze the launcher -> pex.exe (onefile, metadata, no UPX) into nbuild/
+        run: |
+          set -e
+          EXTRA=""
+          if [ "${{ matrix.exe }}" = "pex.exe" ]; then EXTRA="--windows-console-mode=disable"; fi
+          python -m nuitka --onefile --assume-yes-for-downloads $EXTRA \
+            --company-name=Bull4Life --product-name=PEX \
+            --product-version=1.0.0 --file-version=1.0.0.0 \
+            --include-module=pex_launch \
+            --output-dir=nbuild --output-filename="${{ matrix.exe }}" \
+            launcher/pex_entry.py
+          ls -la "nbuild/${{ matrix.exe }}"
+
+      - name: Package pex/ = pex.exe + embeddable python (pythonw BESIDE the exe)
+        run: |
+          set -e
+          mkdir pex
+          cp "nbuild/${{ matrix.exe }}" pex/
+          cp -r python/. pex/                 # embeddable python flat beside the exe. Linux: bin/python3 (rpath resolves);
+                                              # do NOT symlink a top-level python3 — zip flattens it to a broken-rpath ELF.
+          echo "package contents (top):"; ls pex | head
+          # BUILD-TIME sibling-python gate (catches bug1 'no secrets' + bug2 broken rpath at build, not on Master):
+          if [ "${{ matrix.exe }}" = "pex.exe" ]; then
+            test -f pex/pythonw.exe || { echo "pythonw.exe missing"; exit 1; }
+            pex/python.exe -c "import secrets,hashlib,ssl,cryptography; print('win sibling python OK', cryptography.__version__)"
+          else
+            pex/bin/python3 -c "import secrets,hashlib,ssl,cryptography; print('linux sibling python OK', cryptography.__version__)"
+          fi
+
+      - name: Self-check the LAUNCHER LOGIC against the live box (fetch+verify+extract, no GUI)
+        run: |
+          set -e
+          export PEX_BOX_URL="$BOX_URL"
+          export PEX_LAUNCH_HOME="$PWD/.pexhome"
+          export PYTHONUTF8=1 PYTHONIOENCODING=utf-8
+          "${{ matrix.pyx }}" -c "import sys,os; sys.path.insert(0,'launcher'); import pex_launch as L; py=L._find_python(); d=L.fetch_current(py); assert os.path.isfile(os.path.join(d,'node','pex_join_out.py')), 'no pex_join_out in fetched tree'; print('SELFCHECK FETCH+VERIFY OK ->', d)"
+          BOXFP=$("${{ matrix.pyx }}" -c "import json,urllib.request; print(json.loads(urllib.request.urlopen('$BOX_URL/node_version',timeout=15).read()).get('consensus_fingerprint',''))")
+          echo "$BOXFP" > "${{ matrix.zip }}.fp"
+          echo "box fp: $BOXFP"; test -n "$BOXFP"
+
+      - name: FROZEN end-to-end smoke-test (run the ACTUAL exe, require it to reach the live tip)
+        # __B4L_FROZEN_SMOKE__ (Cludia) — THE gate that catches frozen-ONLY bugs (secrets / layout / onefile sys.executable)
+        # the logic self-check above CANNOT see. Runs the real frozen binary headless against the live box; the build FAILS
+        # if it doesn't join the live chain. This ends the you-freeze / I-test / repeat loop.
+        run: |
+          set +e
+          export PEX_JOIN_VIEW=0 PEX_LAUNCH_HOME="$PWD/.pexfrozen" PEX_BOX_URL="$BOX_URL"
+          rm -rf "$PEX_LAUNCH_HOME"
+          if [ "${{ matrix.exe }}" = "pex.exe" ]; then BIN="./pex/pex.exe"; else BIN="./pex/pex"; fi
+          "$BIN" > frozen_smoke.log 2>&1 &
+          PID=$!
+          for i in $(seq 1 45); do
+            sleep 2
+            grep -q "AT THE LIVE TIP" frozen_smoke.log && break
+            kill -0 $PID 2>/dev/null || break
+          done
+          kill $PID 2>/dev/null; wait $PID 2>/dev/null
+          echo "---- frozen_smoke.log (tail) ----"; tail -n 30 frozen_smoke.log
+          if grep -q "AT THE LIVE TIP" frozen_smoke.log; then
+            echo "FROZEN SMOKE-TEST PASSED - the exe reached the live tip"
+          else
+            echo "FROZEN SMOKE-TEST FAILED - the exe never reached the tip (see log above)"; exit 1
+          fi
+
+      - name: Zip the package
+        run: python -c "import shutil; shutil.make_archive('${{ matrix.zip }}'[:-4], 'zip', '.', 'pex')"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.zip }}
+          path: |
+            ${{ matrix.zip }}
+            ${{ matrix.zip }}.fp
+          retention-days: 14
+
+      - name: Publish as a Release (PUBLIC download — I pull these to the box with no Actions perms needed)
+        # Uses the workflow's own GITHUB_TOKEN (permissions.contents: write). Both matrix legs upload to the same tag;
+        # the box then curls https://github.com/dmanobela-glitch/pex-build/releases/download/build-latest/<zip>.
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-latest
+          name: PEX latest build (fetch-launcher)
+          files: |
+            ${{ matrix.zip }}
+            ${{ matrix.zip }}.fp
