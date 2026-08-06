@@ -101,6 +101,19 @@ jobs:
                                               # do NOT symlink a top-level python3 — zip flattens it to a broken-rpath ELF.
           # drop debug symbols (engine 2041 nit: python312.pdb alone is 16MB) — shrinks the zip, no runtime impact.
           find pex -name '*.pdb' -delete 2>/dev/null || true
+          # __B4L_QT_TRIM__ (Master 2026-08-06: "why so big?"): drop Qt/Chromium dead weight the PEX window never uses —
+          # webengine DEVTOOLS resources (72MB debug + 11MB, only for F12 inspector) + Qt modules unrelated to a WebEngine
+          # window (3D/Multimedia/Charts/Quick3D/Sql/Test/Designer/Pdf/Sensors/Bluetooth/etc). Saves ~120MB. Conservative:
+          # KEEP QtWebEngine* + Core/Gui/Widgets/Network/WebChannel/Quick/Qml/Positioning/OpenGL/PrintSupport (its deps).
+          if [ "${{ matrix.exe }}" = "pex.exe" ]; then
+            find pex -name 'qtwebengine_devtools_resources*' -delete 2>/dev/null || true
+            for _m in 3D Multimedia Charts Quick3D DataVisualization Sql Test Designer Pdf Sensors Bluetooth Nfc \
+                      SerialPort SerialBus RemoteObjects Scxml SpatialAudio TextToSpeech Help WebSockets_Qt Location; do
+              find pex/Lib/site-packages/PySide6 -iname "Qt6${_m}*.dll" -delete 2>/dev/null || true
+              find pex/Lib/site-packages/PySide6 -iname "Qt${_m}.pyd" -delete 2>/dev/null || true
+            done
+            find pex/Lib/site-packages/PySide6 -iname "*examples*" -o -iname "*.debug*" -delete 2>/dev/null || true
+          fi
           echo "package contents (top):"; ls pex | head
           # BUILD-TIME sibling-python gate (catches bug1 'no secrets' + bug2 broken rpath at build, not on Master):
           if [ "${{ matrix.exe }}" = "pex.exe" ]; then
