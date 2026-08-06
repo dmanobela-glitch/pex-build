@@ -70,7 +70,10 @@ jobs:
           set -e
           "${{ matrix.pyx }}" -m pip install --upgrade pip
           "${{ matrix.pyx }}" -m pip install cryptography certifi
-          "${{ matrix.pyx }}" -m pip install pywebview || echo "pywebview optional (GUI falls back to terminal)"
+          "${{ matrix.pyx }}" -m pip install pywebview
+          # Qt/QWebEngine backend — the BEAUTIFUL window with ZERO .NET (engine 2041: WebView2/pythonnet is a dead end in
+          # the embeddable python). pywebview renders PAGE via QtWebEngine (Chromium). ~150MB but the window actually opens.
+          "${{ matrix.pyx }}" -m pip install PySide6
 
       - name: Install Nuitka (build-python)
         run: python -m pip install "nuitka" ordered-set zstandard
@@ -95,14 +98,15 @@ jobs:
           cp "nbuild/${{ matrix.exe }}" pex/
           cp -r python/. pex/                 # embeddable python flat beside the exe. Linux: bin/python3 (rpath resolves);
                                               # do NOT symlink a top-level python3 — zip flattens it to a broken-rpath ELF.
+          # drop debug symbols (engine 2041 nit: python312.pdb alone is 16MB) — shrinks the zip, no runtime impact.
+          find pex -name '*.pdb' -delete 2>/dev/null || true
           echo "package contents (top):"; ls pex | head
           # BUILD-TIME sibling-python gate (catches bug1 'no secrets' + bug2 broken rpath at build, not on Master):
           if [ "${{ matrix.exe }}" = "pex.exe" ]; then
             test -f pex/pythonw.exe || { echo "pythonw.exe missing"; exit 1; }
             pex/python.exe -c "import secrets,hashlib,ssl,cryptography; print('win sibling python OK', cryptography.__version__)"
-            # GUI stack must at least IMPORT in the shipped python (pywebview + pythonnet/clr) — a broken import = no window.
-            # Non-fatal warn (headless still works + WebView2/.NET runtime is a per-machine dep), but surfaced in the log.
-            pex/python.exe -c "import webview, clr_loader; print('win GUI stack import OK')" || echo "WARN: GUI stack import FAILED (pywebview/pythonnet) — window may not open"
+            # GUI = Qt/QWebEngine (no .NET). REQUIRE webview + PySide6 to import — a broken import = no window → FAIL the build.
+            pex/python.exe -c "import webview, PySide6.QtWebEngineWidgets; print('win Qt GUI stack import OK')"
           else
             pex/bin/python3 -c "import secrets,hashlib,ssl,cryptography; print('linux sibling python OK', cryptography.__version__)"
           fi
