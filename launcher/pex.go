@@ -262,7 +262,10 @@ func main() {
 	}
 	mode := "node.pex_lite"
 	if full {
-		mode = "node.pex_full_app" // joins the mesh + serves the exchange UI locally + opens the window/browser
+		// Master 2026-08-07: full node = the IN-PROCESS GUI (pex_join_out → pex_gui reads the node via PexJsApi in memory,
+		// NO localhost web server, one program). Honors the no-HTTP/one-program rule. (pex_full_app's local web-server
+		// front was a test shortcut only, NOT the ship path.)
+		mode = "node.pex_join_out"
 	}
 
 	home, _ := os.UserHomeDir()
