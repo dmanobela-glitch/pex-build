@@ -262,7 +262,7 @@ func main() {
 	}
 	mode := "node.pex_lite"
 	if full {
-		mode = "node.pex_join_out"
+		mode = "node.pex_full_app" // joins the mesh + serves the exchange UI locally + opens the window/browser
 	}
 
 	home, _ := os.UserHomeDir()
