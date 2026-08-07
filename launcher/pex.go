@@ -34,6 +34,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -167,6 +168,81 @@ func findPython() string {
 	return ""
 }
 
+func httpGetURL(url string, timeout time.Duration) ([]byte, error) {
+	c := &http.Client{Timeout: timeout}
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("User-Agent", "pex/go")
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("http %d for %s", resp.StatusCode, url)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+// pythonStandaloneURL — where to stream a relocatable, self-contained Python for THIS platform when the user has none.
+// Defaults to python-build-standalone (reliable public relocatable CPython, no system deps); override with PEX_PYTHON_URL
+// (e.g. to serve it from the chain/box). The "install_only" tarball extracts to python/bin/python3 (unix) or
+// python/python.exe (windows).
+func pythonStandaloneURL() string {
+	if u := os.Getenv("PEX_PYTHON_URL"); u != "" {
+		return u
+	}
+	const ver, tag = "3.11.9", "20240814"
+	triple := map[string]string{
+		"linux/amd64":   "x86_64-unknown-linux-gnu",
+		"windows/amd64": "x86_64-pc-windows-msvc",
+		"darwin/arm64":  "aarch64-apple-darwin",
+		"darwin/amd64":  "x86_64-apple-darwin",
+	}[runtime.GOOS+"/"+runtime.GOARCH]
+	if triple == "" {
+		return ""
+	}
+	return "https://github.com/astral-sh/python-build-standalone/releases/download/" + tag +
+		"/cpython-" + ver + "+" + tag + "-" + triple + "-install_only.tar.gz"
+}
+
+// ensurePython — a usable Python to RUN the streamed node. System/bundled first (servers + most users have one); else
+// stream a relocatable runtime ONCE and cache it (generic tool, not our code → NOT wiped, so restart is instant).
+func ensurePython() string {
+	if p := findPython(); p != "" {
+		return p
+	}
+	home, _ := os.UserHomeDir()
+	rtDir := filepath.Join(home, ".pex", "runtime", runtime.GOOS+"_"+runtime.GOARCH)
+	pyPath := filepath.Join(rtDir, "python", "bin", "python3")
+	if runtime.GOOS == "windows" {
+		pyPath = filepath.Join(rtDir, "python", "python.exe")
+	}
+	if _, err := os.Stat(pyPath); err == nil {
+		return pyPath // already cached
+	}
+	url := pythonStandaloneURL()
+	if url == "" {
+		return ""
+	}
+	fmt.Println("[pex] no Python found — streaming a relocatable runtime once (cached for next time)...")
+	data, err := httpGetURL(url, 300*time.Second)
+	if err != nil {
+		fmt.Printf("[pex] python fetch failed (%v) — install python3 or set PEX_PYTHON\n", err)
+		return ""
+	}
+	os.MkdirAll(rtDir, 0o755)
+	if err := untar(data, rtDir); err != nil {
+		fmt.Printf("[pex] python unpack failed (%v)\n", err)
+		return ""
+	}
+	os.Chmod(pyPath, 0o755)
+	if _, err := os.Stat(pyPath); err == nil {
+		fmt.Println("[pex] runtime ready (cached)")
+		return pyPath
+	}
+	return ""
+}
+
 func safe(s string) string {
 	if len(s) > 16 {
 		return s[:16]
@@ -238,9 +314,9 @@ func main() {
 		os.Rename(tmp, cache)
 	}
 
-	py := findPython()
+	py := ensurePython()
 	if py == "" {
-		fmt.Println("[pex] no Python runtime found to run the node (ship one beside the binary or install python3)")
+		fmt.Println("[pex] no Python runtime available and none could be streamed — install python3 or set PEX_PYTHON")
 		os.Exit(5)
 	}
 
