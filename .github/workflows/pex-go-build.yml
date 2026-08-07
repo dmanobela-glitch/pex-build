@@ -1,0 +1,56 @@
+# pex-go-build (Cludia 2026-08-07) — cross-compile the tiny Go launcher launcher/pex.go into native binaries for
+# Windows + Linux + macOS FROM ONE ubuntu runner (Go cross-compiles natively; CGO off → static, no runtime dep).
+#
+# ADDITIVE + SAFE: a SEPARATE workflow from the existing Nuitka pex-build.yml (which still builds the Python pex.exe).
+# This uploads ARTIFACTS ONLY — it does NOT publish a release or overwrite any served binary. Promote to the real
+# download only after we've verified the Go binary end-to-end. Nothing existing is touched or lost.
+name: pex-go-build
+on:
+  push:
+    paths:
+      - 'launcher/pex.go'
+      - '.github/workflows/pex-go-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Cross-compile pex.go (static, stripped) for all OSes
+        run: |
+          set -e
+          cd launcher
+          [ -f go.mod ] || go mod init pex        # stdlib-only → no deps to fetch
+          go vet ./... || true
+          mkdir -p ../out
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../out/pex.exe      pex.go
+          CGO_ENABLED=0 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../out/pex-linux    pex.go
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=arm64 go build -trimpath -ldflags "-s -w" -o ../out/pex-mac-arm64 pex.go
+          CGO_ENABLED=0 GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ../out/pex-mac-x64   pex.go
+          echo '--- built (native, no runtime) ---'; ls -la ../out
+
+      - name: Smoke — run the linux binary, require it to reach the chain + verify + start the node
+        run: |
+          set -e
+          chmod +x out/pex-linux
+          # it needs a python to RUN the streamed node; the runner has one
+          echo "PEX_PYTHON=$(command -v python3)"
+          export PEX_PYTHON=$(command -v python3)
+          # lite mode; the node runs forever, so timeout-kill after it proves stream+verify+launch
+          timeout 40 out/pex-linux > go_smoke.log 2>&1 || true
+          echo '---- go_smoke.log ----'; cat go_smoke.log | head -20
+          grep -q 'chain ratified fp' go_smoke.log || { echo 'FAIL: launcher did not reach the chain'; exit 1; }
+          grep -Eq 'verified|running from hidden cache' go_smoke.log || { echo 'FAIL: launcher did not verify/launch'; exit 1; }
+          echo 'SMOKE OK — Go launcher streamed + verified + launched the node'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pex-go-binaries
+          path: out/*
+          retention-days: 14
